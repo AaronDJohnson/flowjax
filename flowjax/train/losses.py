@@ -6,9 +6,16 @@ distribution (see ``equinox.partition``).
 
 from collections.abc import Callable
 
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec
+from jax.sharding import NamedSharding
+from jax.experimental import mesh_utils
+
 import equinox as eqx
 import jax.numpy as jnp
 from jax import vmap
+import jax
+from jax.experimental.shard_map import shard_map
 from jax.lax import stop_gradient
 from jax.scipy.special import logsumexp
 from jaxtyping import Array, ArrayLike, Float, PRNGKeyArray
@@ -121,10 +128,18 @@ class ElboLoss:
         num_samples: int,
         *,
         stick_the_landing: bool = False,
+        mesh_shape: tuple[int, int] = None,
     ):
         self.target = target
         self.num_samples = num_samples
         self.stick_the_landing = stick_the_landing
+        if mesh_shape is not None:
+            self.P = jax.sharding.PartitionSpec
+            self.devices = mesh_utils.create_device_mesh(mesh_shape)
+            self.mesh = jax.sharding.Mesh(self.devices, ('x', 'y'))
+            self.sharding = jax.sharding.NamedSharding(self.mesh, self.P('x', 'y'))
+            print('Sharding:')
+            print(self.sharding)
 
     @eqx.filter_jit
     def __call__(
@@ -152,5 +167,5 @@ class ElboLoss:
             # Requires only forward pass through the flow.
             samples, log_probs = dist.sample_and_log_prob(key, (self.num_samples,))
 
-        target_density = vmap(self.target)(samples)
+        target_density = shard_map(vmap(self.target), mesh=self.mesh, in_specs=self.P('x'), out_specs=self.P('x'))(samples)
         return (log_probs - target_density).mean()
